@@ -1,38 +1,69 @@
 #!/usr/bin/env python3
-"""One MetaTrader 5 market order, then stop.
+"""One MetaTrader 5 ticket.
 
-Windows only. MetaTrader 5 must already be open and logged in.
-Exness is that login: there is no separate Exness socket.
-This file does not run in Termux.
+Windows only. The terminal must already be logged in. Exness is that login.
+This does not run in Termux.
 
-  pip install MetaTrader5
-  python mt5_once.py EURUSD buy 0.01 25 40
+Default is paper: the gate runs, and order_send is not called.
 
-Arguments: symbol  buy|sell  lots  stop_pips  target_pips
+  python mt5_once.py EURUSD buy 0.01 40 60
+  PIP_LIVE=1 python mt5_once.py EURUSD buy 0.01 40 60 --live SEND
+
+A kill file from `python pip.py kill` blocks the live path.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+from pathlib import Path
+
+
+def desk():
+    path = Path(__file__).resolve().with_name("pip.py")
+    spec = importlib.util.spec_from_file_location("pip_desk", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("pip.py is missing beside this file")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 6:
+    args = [item for item in argv[1:] if item != "--live"]
+    live_flag = "--live" in argv[1:]
+    if len(args) != 5:
         print(__doc__)
         return 1
-    symbol = argv[1].upper()
-    side = argv[2].lower()
-    lots = float(argv[3])
-    stop_pips = float(argv[4])
-    target_pips = float(argv[5])
+    symbol, side, lots_s, stop_s, target_s = args
+    symbol = symbol.upper()
+    side = side.lower()
+    confirm = "SEND" if live_flag else ""
+    lots = float(lots_s)
+    stop_pips = float(stop_s)
+    target_pips = float(target_s)
     if side not in ("buy", "sell"):
         print("Side must be buy or sell.")
         return 2
-    if lots <= 0 or lots > 1:
-        print("REFUSE  lots  this bridge sends at most 1.0 lot, once.")
+    if lots <= 0 or lots > 0.1:
+        print("REFUSE  lots  this bridge sends at most 0.10 lot.")
         return 2
     if stop_pips <= 0 or target_pips <= 0:
         print("REFUSE  stop and target must be above zero.")
+        return 2
+    engine = desk()
+    if engine.gate(symbol, "long" if side == "buy" else "short", stop_pips, 1000) != 0:
+        return 2
+    if not live_flag:
+        print("PAPER  order_send was not called.")
+        print(f"TICKET  {symbol} {side} {lots} lots  stop {stop_pips:g}  target {target_pips:g}")
+        return 0
+    blocked = engine.live_ready(confirm)
+    if blocked:
+        print(f"PAPER  {blocked}")
+        return 0
+    if engine.seen_recent(symbol):
+        print(f"REFUSE  duplicate  {symbol} already filled in the last two minutes")
         return 2
     try:
         import MetaTrader5 as mt5
@@ -44,12 +75,13 @@ def main(argv: list[str]) -> int:
         print(f"REFUSE  terminal  {mt5.last_error()}")
         return 2
     info = mt5.symbol_info(symbol)
-    if info is None or not mt5.symbol_select(symbol, True):
+    if info is None or not info.visible and not mt5.symbol_select(symbol, True):
         print(f"REFUSE  symbol  {symbol} is not in this terminal.")
         mt5.shutdown()
         return 2
+    info = mt5.symbol_info(symbol)
     tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
+    if info is None or tick is None:
         print("REFUSE  no tick. The market may be closed.")
         mt5.shutdown()
         return 2
@@ -57,8 +89,6 @@ def main(argv: list[str]) -> int:
     pip = point * (10 if info.digits in (3, 5) else 1)
     price = tick.ask if side == "buy" else tick.bid
     direction = 1 if side == "buy" else -1
-    sl = price - direction * stop_pips * pip
-    tp = price + direction * target_pips * pip
     order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -66,8 +96,8 @@ def main(argv: list[str]) -> int:
         "volume": lots,
         "type": order_type,
         "price": price,
-        "sl": round(sl, info.digits),
-        "tp": round(tp, info.digits),
+        "sl": round(price - direction * stop_pips * pip, info.digits),
+        "tp": round(price + direction * target_pips * pip, info.digits),
         "deviation": 20,
         "magic": 870,
         "comment": "PiP once",
@@ -80,8 +110,10 @@ def main(argv: list[str]) -> int:
         code = None if result is None else result.retcode
         comment = "" if result is None else result.comment
         print(f"REFUSED  {code} {comment}")
+        engine.remember(symbol, "rejected", False)
         return 2
     print(f"ACCEPTED  ticket {result.order}  {symbol} {side} {lots} lots")
+    engine.remember(symbol, f"ticket {result.order}", True)
     return 0
 
 

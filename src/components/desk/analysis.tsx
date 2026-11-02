@@ -15,7 +15,7 @@ import {
   type AnalyzedId,
   type CalEvent,
 } from "@/lib/fx/analysis";
-import { loadBinancePublic, loadDeskContext, sendBinanceSpot, type DeskContext } from "@/lib/fx/context";
+import { cancelBinanceSpot, loadBinanceBook, loadDeskContext, sendBinanceSpot, type DeskContext } from "@/lib/fx/context";
 import { realNotional, type Position } from "@/lib/fx/model";
 import { HOURLY_PIPS, PAIRS, formatZone, zoneClock, signedUsd, usd, type PairId } from "@/lib/fx/research";
 import { useDesk } from "@/lib/fx/store";
@@ -101,8 +101,9 @@ export function AnalysisBoard({
   const venue = useDesk((s) => s.venue);
   const setVenue = useDesk((s) => s.setVenue);
   const load = useServerFn(loadDeskContext);
-  const pingBinance = useServerFn(loadBinancePublic);
+  const pingBinance = useServerFn(loadBinanceBook);
   const sendSpot = useServerFn(sendBinanceSpot);
+  const cancelSpot = useServerFn(cancelBinanceSpot);
   const [ctx, setCtx] = useState<DeskContext | null>(null);
   const [now, setNow] = useState<Date | null>(null);
   const [pair, setPair] = useState<AnalyzedId>("EURUSD");
@@ -121,6 +122,9 @@ export function AnalysisBoard({
   const [apiSecret, setApiSecret] = useState("");
   const [quoteText, setQuoteText] = useState("10");
   const [confirm, setConfirm] = useState("");
+  const [sender, setSender] = useState("");
+  const [orderId, setOrderId] = useState("");
+  const [arm, setArm] = useState<"paper" | "testnet" | "mainnet">("paper");
   const [serverName, setServerName] = useState("");
   const [login, setLogin] = useState("");
 
@@ -395,7 +399,7 @@ export function AnalysisBoard({
 
       <h3 className="mt-5 font-serif text-xl">Venues</h3>
       <p className="mt-1 text-sm text-muted">
-        The website is the desk. It will send one Binance spot buy, and only after the gates pass and you type SEND. MetaTrader and Exness are not sockets a browser can open. Their ticket is the bridge file, run on the computer where the terminal is already logged in. Keys are not saved. Nothing loops while you sleep.
+        The website is the desk. Paper is the default. A Binance order leaves this page only after the hard gate passes on the server, you arm testnet or mainnet, and you type SEND. The same gate blocks a direct call. MetaTrader and Exness do not send unless the bridge is armed the same way, on the computer where the terminal is already logged in. Keys are not saved. A file named KILL, or PIP_KILL=1, stops every live path.
       </p>
       <div className="mt-3 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Venue">
         {(
@@ -425,30 +429,28 @@ export function AnalysisBoard({
               type="button"
               variant="secondary"
               onClick={() => {
-                setBinance("Reading the public book…");
+                setBinance("Reading the live book…");
                 void pingBinance()
                   .then((row) => {
                     setBinance(
-                      row.ok && row.price
-                        ? `BTCUSDT ${row.price.toFixed(2)}. Public price. Not a fill.`
-                        : "Binance did not answer.",
+                      row.ok && row.bid != null && row.ask != null && row.hour != null
+                        ? `Bid ${row.bid.toFixed(2)}  ask ${row.ask.toFixed(2)}  spread ${row.spread?.toFixed(2)}  last hour ${row.hour.toFixed(0)} USDT. Live tape. Not a fill.`
+                        : row.detail,
                     );
                   })
                   .catch(() => setBinance("Binance did not answer."));
               }}
             >
-              Read BTCUSDT
+              Read the BTC book
             </Button>
           </div>
           <p className="text-sm text-muted">{binance}</p>
           {pair !== "BTCUSD" ? (
-            <p className="text-sm text-muted">This page sends BTCUSDT only. EURUSD and the rest go through the MetaTrader bridge, not Binance spot.</p>
-          ) : verdict.status === "refuse" ? (
-            <p className="text-sm text-down">The gates refused this ticket. Binance will not be asked.</p>
+            <p className="text-sm text-muted">Forex has no live feed on this page. EURUSD and the rest stay on the prior gate, and they are not sent from here.</p>
           ) : (
             <>
               <label className="block text-sm text-muted">
-                Spend, USDT. One click, 5 to 250.
+                Spend, USDT. One click, 5 to 250. The stop above is USDT of distance. The live hour has to be smaller than that stop.
                 <input
                   className="mt-1 h-11 w-full rounded-sm bg-surface-2 px-3 font-mono text-fg"
                   inputMode="decimal"
@@ -457,53 +459,126 @@ export function AnalysisBoard({
                   autoComplete="off"
                 />
               </label>
-              <input
-                className="h-11 rounded-sm bg-surface-2 px-3 text-fg"
-                placeholder="Binance API key"
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <input
-                className="h-11 rounded-sm bg-surface-2 px-3 text-fg"
-                placeholder="API secret"
-                type="password"
-                value={apiSecret}
-                onChange={(event) => setApiSecret(event.target.value)}
-                autoComplete="off"
-              />
-              <label className="block text-sm text-muted">
-                Type SEND to confirm a real market buy.
-                <input
-                  className="mt-1 h-11 w-full rounded-sm bg-surface-2 px-3 font-mono text-fg"
-                  value={confirm}
-                  onChange={(event) => setConfirm(event.target.value)}
-                  autoComplete="off"
-                />
-              </label>
-              <Button
-                type="button"
-                disabled={confirm.trim().toUpperCase() !== "SEND" || apiKey.length < 16 || apiSecret.length < 16}
-                onClick={() => {
-                  const quoteUsdt = Number(quoteText);
-                  setBinance("Sending one market buy…");
-                  setApiSecret("");
-                  setConfirm("");
-                  void sendSpot({ data: { symbol: "BTCUSDT", quoteUsdt, apiKey, apiSecret } })
-                    .then((row) => {
-                      setApiKey("");
-                      setBinance(row.detail);
+              <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Execution">
+                {(
+                  [
+                    ["paper", "Paper"],
+                    ["testnet", "Testnet"],
+                    ["mainnet", "Mainnet"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="radio"
+                    aria-checked={arm === id}
+                    onClick={() => setArm(id)}
+                    className={cn("press h-11 rounded-sm text-sm", arm === id ? "bg-accent text-accent-fg" : "bg-surface-2 text-muted")}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {arm === "paper" ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    setBinance("Checking the gate…");
+                    void sendSpot({
+                      data: { symbol: "BTCUSDT", quoteUsdt: Number(quoteText), stopPips, mode: "paper" },
                     })
-                    .catch((error: unknown) => {
+                      .then((row) => setBinance(row.detail))
+                      .catch((error: unknown) => setBinance(error instanceof Error ? error.message : "Not sent."));
+                  }}
+                >
+                  Paper this buy
+                </Button>
+              ) : (
+                <>
+                  <input
+                    className="h-11 rounded-sm bg-surface-2 px-3 text-fg"
+                    placeholder={arm === "testnet" ? "Testnet API key" : "Mainnet API key"}
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <input
+                    className="h-11 rounded-sm bg-surface-2 px-3 text-fg"
+                    placeholder="API secret"
+                    type="password"
+                    value={apiSecret}
+                    onChange={(event) => setApiSecret(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <input
+                    className="h-11 rounded-sm bg-surface-2 px-3 text-fg"
+                    placeholder="Sender, the name this server was given"
+                    value={sender}
+                    onChange={(event) => setSender(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <label className="block text-sm text-muted">
+                    Type SEND. A limit buy joins the bid, so it can be cancelled. {arm === "mainnet" ? "Mainnet spends real money." : "Testnet does not."}
+                    <input
+                      className="mt-1 h-11 w-full rounded-sm bg-surface-2 px-3 font-mono text-fg"
+                      value={confirm}
+                      onChange={(event) => setConfirm(event.target.value)}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <Button
+                    type="button"
+                    disabled={confirm.trim().toUpperCase() !== "SEND" || apiKey.length < 16 || apiSecret.length < 16 || sender.trim().length < 2}
+                    onClick={() => {
+                      const quoteUsdt = Number(quoteText);
+                      const secret = apiSecret;
+                      const key = apiKey;
+                      const who = sender.trim();
+                      setBinance(arm === "testnet" ? "Sending one testnet limit…" : "Sending one mainnet limit…");
+                      setApiSecret("");
                       setApiKey("");
-                      setBinance(error instanceof Error ? error.message : "The order was not accepted.");
-                    });
-                }}
-              >
-                Send one BTCUSDT buy
-              </Button>
-              <p className="text-sm text-subtle">A short is not a spot order. This button only buys. The secret is cleared when you press it.</p>
+                      setConfirm("");
+                      void sendSpot({
+                        data: { symbol: "BTCUSDT", quoteUsdt, stopPips, apiKey: key, apiSecret: secret, mode: arm, confirm: "SEND", sender: who },
+                      })
+                        .then((row) => setBinance(row.detail))
+                        .catch((error: unknown) => setBinance(error instanceof Error ? error.message : "The order was not accepted."));
+                    }}
+                  >
+                    {arm === "testnet" ? "Send one testnet limit" : "Send one mainnet limit"}
+                  </Button>
+                  <input
+                    className="h-11 rounded-sm bg-surface-2 px-3 font-mono text-fg"
+                    placeholder="Order id to cancel"
+                    value={orderId}
+                    onChange={(event) => setOrderId(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={!/^\d+$/.test(orderId.trim()) || apiKey.length < 16 || apiSecret.length < 16 || sender.trim().length < 2}
+                    onClick={() => {
+                      const secret = apiSecret;
+                      const key = apiKey;
+                      const who = sender.trim();
+                      const id = orderId.trim();
+                      setApiSecret("");
+                      setApiKey("");
+                      void cancelSpot({
+                        data: { orderId: id, apiKey: key, apiSecret: secret, mode: arm === "mainnet" ? "mainnet" : "testnet", confirm: "CANCEL", sender: who },
+                      })
+                        .then((row) => setBinance(row.detail))
+                        .catch((error: unknown) => setBinance(error instanceof Error ? error.message : "Not cancelled."));
+                    }}
+                  >
+                    Cancel that order
+                  </Button>
+                </>
+              )}
+              <p className="text-sm text-subtle">A short is not a spot order. The live order is a limit on the bid. The secret is cleared when you press the button. The log keeps the order id and the sender, not the key.</p>
             </>
           )}
         </div>
@@ -514,7 +589,7 @@ export function AnalysisBoard({
             {venue === "exness"
               ? "Exness is a MetaTrader server. Log the terminal into that server on a computer, then run the bridge once."
               : "MetaTrader has to be open and logged in on Windows. The website cannot see that terminal."}{" "}
-            The bridge sends one market order and then stops. It does not run on a phone.
+            The bridge runs the same gate, then stops. A command without --live never calls order_send. Live, once, is PIP_LIVE=1 and --live SEND, and a kill file blocks it.
           </p>
           <input
             className="h-11 rounded-sm bg-surface-2 px-3 text-fg"

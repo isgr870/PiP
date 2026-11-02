@@ -1,44 +1,21 @@
 # PiP
 
-The desk is this website. Add it to the home screen from the browser. There is no Play Store app, and it is not a forecast.
+A risk desk for one person. Not a Wall Street system, and not ready to replace one.
 
-The zone is yours to pick. Type any stake. The path uses the win rate you type, not a measured edge. Nothing here trades while you sleep.
+Bitcoin eligibility is the live Binance book: bid, ask, and the last hour of trades. Forex still uses the prior table in `pip.py`, because this desk has no forex feed. A prior is not a price.
 
-## Phone (Termux)
+Progression, in order:
+
+1. `python pip.py book` reads the live BTC book and sends nothing.
+2. `python pip.py binance 10 2000 1000` runs that book against your stop. Paper. Nothing is sent.
+3. A live order is a limit buy sitting on the bid, so it can be cancelled. It needs the kill file absent, `PIP_LIVE=1`, `PIP_SENDER` set to a name, and the word `SEND`. The account's free USDT is the size ceiling. Testnet unless `PIP_BINANCE_MAINNET=1`.
+4. `python pip.py status ORDERID` matches the order to a fill. `python pip.py cancel ORDERID CANCEL` pulls it.
+5. `~/.pip/orders.log` keeps the sender, the order id, and the result. It does not keep the secret. `python pip.py kill` stops new sends.
+
+The website does the same for BTC. It will not send unless the server itself has `PIP_SENDER` set to the same name, and mainnet also needs `PIP_LIVE=1`.
 
 ```sh
-pkg install python
-git clone https://github.com/isgr870/PiP.git
-cd PiP
+python pip.py book
+python pip.py binance 10 2000 1000
 python pip.py gate EURUSD long 25 300
-python pip.py stake 250 0.5 25 1.5 45 40
-```
-
-On a Saturday the forex gate refuses before it talks about pips. Bitcoin does not.
-
-One Binance spot buy, 5 to 250 USDT, then unset the keys:
-
-```sh
-export BINANCE_API_KEY=...
-export BINANCE_API_SECRET=...
-python pip.py binance 10
-unset BINANCE_API_KEY BINANCE_API_SECRET
-```
-
-## MetaTrader and Exness
-
-Those are the same terminal. On Windows, logged in:
-
-```sh
-pip install MetaTrader5
-python mt5_once.py EURUSD buy 0.01 25 40
-```
-
-That file does not run on a phone.
-
-## Desk
-
-```sh
-npm install
-npm run dev
 ```

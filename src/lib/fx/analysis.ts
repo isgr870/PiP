@@ -253,6 +253,19 @@ export function fxMarketClosed(now = new Date()): boolean {
   return false;
 }
 
+/** Hard gates only. Execution must call this. A soft news cut is not enough to skip it. */
+export function executionBlocked(pair: AnalyzedId, stopPips: number, minuteUtc: number, now = new Date()): string | null {
+  if (pair !== "BTCUSD" && fxMarketClosed(now)) return "Spot forex is closed. No order was sent.";
+  const session = sessionAt(minuteUtc);
+  const sessionGate = allowsNewRisk(pair, session.id);
+  if (!sessionGate.ok) return `${sessionGate.text} No order was sent.`;
+  const noise = typicalHourPips(pair, minuteUtc);
+  if (!(stopPips >= noise * 1.5)) return `Stop of ${stopPips.toFixed(0)} sits inside a ${noise.toFixed(0)} hour. No order was sent.`;
+  const spread = spreadPipsOf(pair, minuteUtc);
+  if (!(stopPips > 0) || spread / stopPips > 0.15) return "Spread is more than 15% of the stop. No order was sent.";
+  return null;
+}
+
 export function judge(p: Proposal, refPrice?: number): Verdict {
   const session = sessionAt(p.minuteUtc);
   const clauses: Clause[] = [];
